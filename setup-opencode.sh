@@ -1,22 +1,40 @@
-```bash
 #!/usr/bin/env bash
+
 set -Eeuo pipefail
+
+# ============================================================
+# OpenCode Power Setup
+# ============================================================
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
 BACKUP_DIR="$CONFIG_DIR/backups"
 PROJECT_DIR="$(pwd)"
 
-info() { printf '\n[INFO] %s\n' "$*"; }
-ok()   { printf '[ OK ] %s\n' "$*"; }
-warn() { printf '[WARN] %s\n' "$*"; }
+info() {
+    printf '\n[INFO] %s\n' "$*"
+}
 
-backup() {
+ok() {
+    printf '[ OK ] %s\n' "$*"
+}
+
+warn() {
+    printf '[WARN] %s\n' "$*"
+}
+
+error() {
+    printf '[ERROR] %s\n' "$*" >&2
+}
+
+backup_file() {
     local file="$1"
 
     if [[ -f "$file" ]]; then
         mkdir -p "$BACKUP_DIR"
+
         cp -a "$file" \
             "$BACKUP_DIR/$(basename "$file").$(date +%Y%m%d-%H%M%S).bak"
+
         ok "Backed up $(basename "$file")"
     fi
 }
@@ -27,81 +45,111 @@ append_once() {
 
     touch "$file"
 
-    grep -Fqx "$value" "$file" 2>/dev/null || \
+    if ! grep -Fqx "$value" "$file" 2>/dev/null; then
         printf '%s\n' "$value" >> "$file"
-}
-
-install_plugin() {
-    local plugin="$1"
-
-    if opencode plugin "$plugin" --global; then
-        ok "Installed $plugin"
-    else
-        warn "Could not automatically install $plugin"
     fi
 }
 
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# ============================================================
+# Header
+# ============================================================
+
+clear 2>/dev/null || true
+
 echo "============================================================"
-echo "              OPENCODE POWER INSTALLER"
+echo "             OPENCODE POWER SETUP"
 echo "============================================================"
 echo
-echo "This installer configures:"
+echo "This setup configures:"
+echo
 echo "  • OpenCode"
 echo "  • OpenCode Mem"
 echo "  • Dynamic Context Pruning"
 echo "  • EnvSitter Guard"
 echo "  • Oh My OpenCode Slim"
-echo "  • Background agents"
+echo "  • Background subagents"
 echo "  • Exa web search"
-echo "  • OpenCode Notify"
+echo "  • OpenCode notifications"
 echo "  • Obot MCP"
 echo "  • AGENTS.md"
 echo "  • Verification pipeline"
 echo "  • Git worktree helper"
 echo
+echo "Existing configuration will be backed up."
+echo "============================================================"
 
-# ------------------------------------------------------------
-# Dependencies
-# ------------------------------------------------------------
+# ============================================================
+# Dependency checks
+# ============================================================
 
-info "Checking dependencies..."
+info "Checking required dependencies..."
 
 for command in curl git node npm; do
-    if ! command -v "$command" >/dev/null 2>&1; then
-        echo "[ERROR] Missing dependency: $command"
+    if ! command_exists "$command"; then
+        error "Missing dependency: $command"
+        echo
+        echo "Please install $command and run this script again."
         exit 1
     fi
 done
 
-NODE_MAJOR="$(node -v | sed 's/^v//' | cut -d. -f1)"
+NODE_MAJOR="$(
+    node -v |
+    sed 's/^v//' |
+    cut -d. -f1
+)"
 
 if (( NODE_MAJOR < 20 )); then
-    echo "[ERROR] Node.js 20+ is required."
-    echo "Detected: Node.js $(node -v)"
+    error "Node.js 20 or newer is required."
+    echo "Detected: $(node -v)"
     exit 1
 fi
 
-ok "Required dependencies found"
+ok "Node.js $(node -v)"
+ok "npm $(npm --version)"
+ok "git available"
+ok "curl available"
 
-# ------------------------------------------------------------
-# OpenCode
-# ------------------------------------------------------------
+# ============================================================
+# Install / update OpenCode
+# ============================================================
 
 info "Installing/updating OpenCode..."
 
-npm install -g @opencode/cli@latest
-
-if ! command -v opencode >/dev/null 2>&1; then
-    echo "[ERROR] OpenCode installation failed."
+if npm install -g @opencode/cli@latest; then
+    ok "OpenCode package installed"
+else
+    error "OpenCode installation failed."
     exit 1
 fi
 
-ok "OpenCode installed"
-opencode --version || true
+# npm may update PATH only after the shell refreshes.
+export PATH="$(npm prefix -g)/bin:$PATH"
 
-# ------------------------------------------------------------
-# Configuration directories
-# ------------------------------------------------------------
+if ! command_exists opencode; then
+    error "OpenCode command was not found after installation."
+    echo
+    echo "Try:"
+    echo "  export PATH=\"$(npm prefix -g)/bin:\$PATH\""
+    echo "  opencode --version"
+    exit 1
+fi
+
+OPENCODE_VERSION="$(opencode --version 2>/dev/null || true)"
+
+if [[ -n "$OPENCODE_VERSION" ]]; then
+    ok "OpenCode $OPENCODE_VERSION"
+else
+    warn "OpenCode installed, but version could not be detected."
+fi
+
+# ============================================================
+# OpenCode directories
+# ============================================================
 
 info "Preparing OpenCode directories..."
 
@@ -110,50 +158,82 @@ mkdir -p \
     "$CONFIG_DIR/backups" \
     "$CONFIG_DIR/agents" \
     "$CONFIG_DIR/commands" \
-    "$CONFIG_DIR/skills"
+    "$CONFIG_DIR/skills" \
+    "$CONFIG_DIR/plugins"
 
-# Never destroy existing configuration.
-backup "$CONFIG_DIR/opencode.json"
-backup "$CONFIG_DIR/opencode.jsonc"
+backup_file "$CONFIG_DIR/opencode.json"
+backup_file "$CONFIG_DIR/opencode.jsonc"
 
 ok "OpenCode directories ready"
 
-# ------------------------------------------------------------
-# Plugins
-# ------------------------------------------------------------
+# ============================================================
+# OpenCode plugins
+# ============================================================
 
 info "Installing OpenCode plugins..."
 
-install_plugin "opencode-mem"
-install_plugin "@chikage0o0/opencode-dcp"
-install_plugin "envsitter-guard@latest"
-install_plugin "opencode-notify"
+install_plugin() {
+    local plugin="$1"
 
-# ------------------------------------------------------------
+    info "Installing $plugin..."
+
+    if opencode plugin add --global "$plugin"; then
+        ok "Installed $plugin"
+    else
+        warn "Could not install $plugin automatically."
+        echo "You can install it later with:"
+        echo "  opencode plugin add --global \"$plugin\""
+    fi
+}
+
+# Persistent memory
+install_plugin "opencode-mem"
+
+# Dynamic Context Pruning
+install_plugin "@chikage0o0/opencode-dcp"
+
+# Secret/environment protection
+install_plugin "envsitter-guard@latest"
+
+# ============================================================
 # Oh My OpenCode Slim
-# ------------------------------------------------------------
+# ============================================================
 
 info "Installing Oh My OpenCode Slim..."
 
-if command -v bun >/dev/null 2>&1; then
-    bunx oh-my-opencode-slim@latest install \
+if command_exists bunx; then
+
+    if bunx oh-my-opencode-slim@latest install \
         --no-tui \
         --skills=yes \
-        --background-subagents=yes
+        --background-subagents=yes; then
+
+        ok "Oh My OpenCode Slim configured"
+
+    else
+        warn "Oh My OpenCode Slim installation failed."
+    fi
+
 else
-    npx oh-my-opencode-slim@latest install \
+
+    if npx oh-my-opencode-slim@latest install \
         --no-tui \
         --skills=yes \
-        --background-subagents=yes
+        --background-subagents=yes; then
+
+        ok "Oh My OpenCode Slim configured"
+
+    else
+        warn "Oh My OpenCode Slim installation failed."
+    fi
+
 fi
 
-ok "Oh My OpenCode Slim configured"
+# ============================================================
+# Shell environment
+# ============================================================
 
-# ------------------------------------------------------------
-# Shell configuration
-# ------------------------------------------------------------
-
-info "Configuring OpenCode environment..."
+info "Configuring background-agent environment..."
 
 if [[ "${SHELL:-}" == */zsh ]]; then
     SHELL_RC="$HOME/.zshrc"
@@ -161,48 +241,56 @@ else
     SHELL_RC="$HOME/.bashrc"
 fi
 
-append_once "$SHELL_RC" \
+append_once \
+    "$SHELL_RC" \
     'export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true'
 
-append_once "$SHELL_RC" \
+append_once \
+    "$SHELL_RC" \
     'export OPENCODE_ENABLE_EXA=1'
 
+# Also activate them immediately for this shell.
 export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
 export OPENCODE_ENABLE_EXA=1
 
-ok "Environment variables configured"
+ok "Background subagents enabled"
+ok "Exa web search environment configured"
 
-# ------------------------------------------------------------
-# Obot
-# ------------------------------------------------------------
+# ============================================================
+# Obot MCP
+# ============================================================
 
 echo
 echo "============================================================"
-echo "                  OBOT / GITHUB MCP"
+echo "                 OBOT MCP CONFIGURATION"
 echo "============================================================"
 echo
-echo "Enter your Obot MCP endpoint."
-echo "Leave empty to configure Obot later."
+echo "Obot is optional."
+echo "If you have an Obot MCP endpoint, enter it below."
+echo "Leave it empty to skip this step."
 echo
 
 read -r -p "Obot MCP URL: " OBOT_URL
 
-if [[ -n "$OBOT_URL" ]]; then
-    if opencode mcp add obot --url "$OBOT_URL"; then
-        ok "Obot MCP configured"
+if [[ -n "${OBOT_URL:-}" ]]; then
+
+    if opencode mcp add obot --global --url "$OBOT_URL"; then
+        ok "Obot MCP registered"
     else
-        warn "Obot could not be registered automatically."
+        warn "Obot MCP could not be registered."
         echo
-        echo "Run later:"
-        echo "opencode mcp add obot --url \"$OBOT_URL\""
+        echo "You can retry later with:"
+        echo
+        echo "  opencode mcp add obot --global --url \"$OBOT_URL\""
     fi
+
 else
     warn "Obot skipped."
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # AGENTS.md
-# ------------------------------------------------------------
+# ============================================================
 
 AGENTS="$PROJECT_DIR/AGENTS.md"
 
@@ -211,93 +299,101 @@ if [[ ! -f "$AGENTS" ]]; then
 cat > "$AGENTS" <<'EOF'
 # AGENTS.md
 
-## Core Development Rules
+## Development Workflow
 
-Inspect existing code before changing it.
+For substantial tasks use this verification loop:
 
-For substantial tasks:
+1. Inspect the repository.
+2. Understand the existing architecture.
+3. Plan the change.
+4. Implement the smallest appropriate change.
+5. Run linting.
+6. Run type checking.
+7. Run tests.
+8. Build the project.
+9. Run the application when possible.
+10. Perform runtime verification.
+11. Inspect failures.
+12. Fix failures.
+13. Repeat verification.
 
-1. Plan.
-2. Implement.
-3. Lint.
-4. Type-check.
-5. Test.
-6. Build.
-7. Run the application when possible.
-8. Inspect errors.
-9. Fix failures.
-10. Repeat verification.
+Do not declare a task complete merely because the code compiles.
 
-## Code
+## Existing Architecture
 
-Prefer existing project architecture.
+Before changing code:
 
-Do not unnecessarily:
-- rewrite working code
-- add dependencies
-- duplicate functionality
-- remove existing features
+- inspect existing files
+- inspect package.json
+- inspect configuration
+- inspect database schema
+- inspect existing APIs
+- inspect existing components
+- reuse existing architecture where practical
+
+Avoid unnecessary rewrites.
+
+## Dependencies
+
+Do not add a dependency unless it is actually required.
+
+Before adding one:
+
+- check whether an existing dependency already provides the functionality
+- check compatibility with the project
+- understand its purpose
 
 ## Security
 
 Never commit:
 
-- `.env`
-- `.env.*`
+- .env
+- .env.*
 - API keys
 - access tokens
 - passwords
 - private keys
 - credentials
+- certificates containing secrets
 
-Use environment variables for secrets.
+Use environment variables or the appropriate secret-management mechanism.
 
 ## Database
 
-Before database changes:
+Before changing database code:
 
 1. Inspect the schema.
-2. Inspect existing migrations.
-3. Understand relationships.
-4. Check affected queries.
-5. Test the affected functionality.
+2. Inspect migrations.
+3. Inspect relationships.
+4. Inspect existing queries.
+5. Check affected frontend/backend code.
+6. Test affected database operations.
 
-Do not destroy existing data without explicit instruction.
+Never destroy existing data unless explicitly instructed.
 
 ## Git
 
 Before committing:
 
-- inspect `git status`
+- run git status
 - inspect the diff
-- check changed files
+- inspect changed files
 - check for secrets
-
-## Verification
-
-A task is not complete merely because it compiles.
-
-Verify:
-
-- lint
-- typecheck
-- tests
-- build
-- runtime behavior
-- relevant APIs
-- relevant database operations
+- verify tests/build status
 
 ## Worktrees
 
-Use a Git worktree for large or risky changes when appropriate.
+For large or risky changes, prefer a Git worktree.
 
-## Completion
+## Completion Report
 
-Before declaring a task complete, report:
+Before declaring completion, report:
 
-- changes made
+- what changed
 - files changed
-- verification performed
+- tests performed
+- lint/typecheck/build status
+- runtime verification
 - remaining issues
 EOF
 
@@ -307,9 +403,9 @@ else
     warn "Existing AGENTS.md preserved"
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # Verification script
-# ------------------------------------------------------------
+# ============================================================
 
 VERIFY="$PROJECT_DIR/verify.sh"
 
@@ -338,77 +434,140 @@ run_check() {
 }
 
 echo "============================================================"
-echo "                 PROJECT VERIFICATION"
+echo "                PROJECT VERIFICATION"
 echo "============================================================"
+
+# ------------------------------------------------------------
+# OpenCode
+# ------------------------------------------------------------
+
+if command -v opencode >/dev/null 2>&1; then
+    run_check "OpenCode version" opencode --version
+else
+    echo "[FAIL] OpenCode is not available"
+    FAILED=1
+fi
+
+# ------------------------------------------------------------
+# Project scripts
+# ------------------------------------------------------------
 
 if [[ -f package.json ]]; then
 
-    if npm run | grep -qE '(^|[[:space:]])lint($|[[:space:]])'; then
+    echo
+    echo ">>> package.json scripts"
+
+    npm run 2>/dev/null || true
+
+    if npm run 2>/dev/null |
+        grep -qE '(^|[[:space:]])lint($|[[:space:]])'; then
+
         run_check "Lint" npm run lint
     fi
 
-    if npm run | grep -qE '(^|[[:space:]])typecheck($|[[:space:]])'; then
+    if npm run 2>/dev/null |
+        grep -qE '(^|[[:space:]])typecheck($|[[:space:]])'; then
+
         run_check "Typecheck" npm run typecheck
     fi
 
-    if npm run | grep -qE '(^|[[:space:]])test($|[[:space:]])'; then
+    if npm run 2>/dev/null |
+        grep -qE '(^|[[:space:]])test($|[[:space:]])'; then
+
         run_check "Tests" npm test
     fi
 
-    if npm run | grep -qE '(^|[[:space:]])build($|[[:space:]])'; then
+    if npm run 2>/dev/null |
+        grep -qE '(^|[[:space:]])build($|[[:space:]])'; then
+
         run_check "Build" npm run build
     fi
 
 else
+
+    echo
     echo "[INFO] package.json not found."
+
 fi
+
+# ------------------------------------------------------------
+# Git
+# ------------------------------------------------------------
 
 echo
 echo ">>> Git status"
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+
     git status --short
+
     echo
     git diff --stat || true
+
+else
+
+    echo "[INFO] Not inside a Git repository."
+
 fi
+
+# ------------------------------------------------------------
+# Secret scan
+# ------------------------------------------------------------
+
+echo
+echo ">>> Secret scanning"
 
 if command -v gitleaks >/dev/null 2>&1; then
-    echo
-    echo ">>> Secret scan"
 
     if gitleaks detect --no-banner; then
-        echo "[PASS] Secret scan"
+        echo "[PASS] Gitleaks"
     else
-        echo "[FAIL] Secret scan"
+        echo "[FAIL] Gitleaks detected possible secrets"
         FAILED=1
     fi
+
 else
-    echo
-    echo "[INFO] Gitleaks not installed."
+
+    echo "[INFO] Gitleaks is not installed."
+    echo "[INFO] Secret scan skipped."
+
 fi
+
+# ------------------------------------------------------------
+# Result
+# ------------------------------------------------------------
 
 echo
 echo "============================================================"
 
 if [[ "$FAILED" -eq 0 ]]; then
-    echo "                 VERIFICATION PASSED"
+
+    echo "             VERIFICATION PASSED"
+
     exit 0
+
 else
-    echo "                 VERIFICATION FAILED"
+
+    echo "             VERIFICATION FAILED"
+
     exit 1
+
 fi
 EOF
 
 chmod +x "$VERIFY"
+
 ok "Created verify.sh"
 
 else
+
     warn "Existing verify.sh preserved"
+
 fi
 
-# ------------------------------------------------------------
-# Worktree helper
-# ------------------------------------------------------------
+# ============================================================
+# Git worktree helper
+# ============================================================
 
 WORKTREE="$PROJECT_DIR/new-worktree.sh"
 
@@ -417,17 +576,20 @@ if [[ ! -f "$WORKTREE" ]]; then
 cat > "$WORKTREE" <<'EOF'
 #!/usr/bin/env bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 BRANCH="${1:-}"
 
 if [[ -z "$BRANCH" ]]; then
-    echo "Usage: ./new-worktree.sh feature-name"
+    echo "Usage:"
+    echo
+    echo "  ./new-worktree.sh feature-name"
     exit 1
 fi
 
 ROOT="$(git rev-parse --show-toplevel)"
 PROJECT="$(basename "$ROOT")"
+
 TARGET="../${PROJECT}-${BRANCH}"
 
 git worktree add -b "$BRANCH" "$TARGET"
@@ -435,23 +597,28 @@ git worktree add -b "$BRANCH" "$TARGET"
 echo
 echo "Worktree created:"
 echo "$TARGET"
+
 echo
 echo "Run:"
 echo "cd \"$TARGET\""
 EOF
 
 chmod +x "$WORKTREE"
+
 ok "Created new-worktree.sh"
 
 else
+
     warn "Existing new-worktree.sh preserved"
+
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # Gitignore
-# ------------------------------------------------------------
+# ============================================================
 
 GITIGNORE="$PROJECT_DIR/.gitignore"
+
 touch "$GITIGNORE"
 
 for entry in \
@@ -468,9 +635,9 @@ done
 
 ok ".gitignore protection configured"
 
-# ------------------------------------------------------------
+# ============================================================
 # Diagnostics
-# ------------------------------------------------------------
+# ============================================================
 
 echo
 echo "============================================================"
@@ -482,40 +649,40 @@ echo "OpenCode:"
 opencode --version || true
 
 echo
-echo "MCP:"
+echo "OpenCode configuration path:"
+opencode debug paths config || true
+
+echo
+echo "MCP servers:"
 opencode mcp list || true
 
 echo
 echo "Plugins:"
 opencode plugin list || true
 
-# ------------------------------------------------------------
-# Complete
-# ------------------------------------------------------------
+# ============================================================
+# Completion
+# ============================================================
 
 echo
 echo "============================================================"
-echo "                 INSTALLATION COMPLETE"
+echo "                 SETUP FINISHED"
 echo "============================================================"
-echo
-echo "Restart your terminal or run:"
-echo
-echo "    source ~/.bashrc"
-echo
-echo "Then:"
-echo
-echo "    opencode --version"
-echo "    opencode mcp list"
-echo "    ./verify.sh"
-echo
-echo "For a separate feature:"
-echo
-echo "    ./new-worktree.sh feature-name"
-echo
-echo "Then launch:"
-echo
-echo "    opencode"
-echo
-echo "============================================================"
-```
 
+echo
+echo "Reload your shell:"
+echo
+echo "  source ~/.bashrc"
+echo
+echo "Then verify:"
+echo
+echo "  opencode --version"
+echo "  opencode plugin list"
+echo "  opencode mcp list"
+echo "  ./verify.sh"
+echo
+echo "Launch OpenCode:"
+echo
+echo "  opencode"
+echo
+echo "============================================================"
